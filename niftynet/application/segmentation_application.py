@@ -27,10 +27,13 @@ from niftynet.layer.post_processing import PostProcessingLayer
 from niftynet.layer.rand_flip import RandomFlipLayer
 from niftynet.layer.rand_rotation import RandomRotationLayer
 from niftynet.layer.rand_spatial_scaling import RandomSpatialScalingLayer
+from niftynet.layer.rgb_histogram_equilisation import \
+    RGBHistogramEquilisationLayer
 from niftynet.evaluation.segmentation_evaluator import SegmentationEvaluator
 from niftynet.layer.rand_elastic_deform import RandomElasticDeformationLayer
 
-SUPPORTED_INPUT = set(['image', 'label', 'weight', 'sampler', 'inferred'])
+SUPPORTED_INPUT = set(
+    ['image', 'label', 'weight', 'sampler', 'inferred', 'value'])
 
 
 class SegmentationApplication(BaseApplication):
@@ -109,6 +112,9 @@ class SegmentationApplication(BaseApplication):
             name='hist_norm_layer') \
             if (self.net_param.histogram_ref_file and
                 self.net_param.normalisation) else None
+        rgb_normaliser = RGBHistogramEquilisationLayer(
+            image_name='image',
+            name='rbg_norm_layer') if self.net_param.rgb_normalisation else None
         label_normalisers = None
         if self.net_param.histogram_ref_file and \
                 task_param.label_normalisation:
@@ -127,23 +133,26 @@ class SegmentationApplication(BaseApplication):
         normalisation_layers = []
         if histogram_normaliser is not None:
             normalisation_layers.append(histogram_normaliser)
+        if rgb_normaliser is not None:
+            normalisation_layers.append(rgb_normaliser)
         if mean_var_normaliser is not None:
             normalisation_layers.append(mean_var_normaliser)
         if task_param.label_normalisation and \
                 (self.is_training or not task_param.output_prob):
             normalisation_layers.extend(label_normalisers)
 
-        volume_padding_layer = []
-        if self.net_param.volume_padding_size:
-            volume_padding_layer.append(PadLayer(
-                image_name=SUPPORTED_INPUT,
-                border=self.net_param.volume_padding_size,
-                mode=self.net_param.volume_padding_mode))
-
+        volume_padding_layer = [PadLayer(
+            image_name=SUPPORTED_INPUT,
+            border=self.net_param.volume_padding_size,
+            mode=self.net_param.volume_padding_mode,
+            pad_to=self.net_param.volume_padding_to_size)
+        ]
         # initialise training data augmentation layers
         augmentation_layers = []
         if self.is_training:
             train_param = self.action_param
+            self.patience = train_param.patience
+            self.mode = self.action_param.early_stopping_mode
             if train_param.random_flipping_axes != -1:
                 augmentation_layers.append(RandomFlipLayer(
                     flip_axes=train_param.random_flipping_axes))
@@ -182,6 +191,15 @@ class SegmentationApplication(BaseApplication):
         for reader in self.readers[1:]:
             reader.add_preprocessing_layers(
                 volume_padding_layer + normalisation_layers)
+
+        # Checking num_classes is set correctly
+        if self.segmentation_param.num_classes <= 1:
+            raise ValueError("Number of classes must be at least 2 for segmentation")
+        for preprocessor in self.readers[0].preprocessors:
+            if preprocessor.name == 'label_norm':
+                if len(preprocessor.label_map[preprocessor.key[0]]) != self.segmentation_param.num_classes:
+                    raise ValueError("Number of unique labels must be equal to "
+                                     "number of classes (check histogram_ref file)")
 
     def initialise_uniform_sampler(self):
         self.sampler = [[UniformSampler(
@@ -237,7 +255,8 @@ class SegmentationApplication(BaseApplication):
             output_path=self.action_param.save_seg_dir,
             window_border=self.action_param.border,
             interp_order=self.action_param.output_interp_order,
-            postfix=self.action_param.output_postfix)
+            postfix=self.action_param.output_postfix,
+            fill_constant=self.action_param.fill_constant)
 
     def initialise_resize_aggregator(self):
         self.output_decoder = ResizeSamplesAggregator(
@@ -289,13 +308,64 @@ class SegmentationApplication(BaseApplication):
                 sampler = self.get_sampler()[0][0 if for_training else -1]
                 return sampler.pop_batch_op()
 
+        def mixup_switch_sampler(for_training):
+            # get first set of samples
+            d_dict = switch_sampler(for_training=for_training)
+
+            mix_fields = ('image', 'weight', 'label')
+
+            if not for_training:
+                with tf.name_scope('nomix'):
+                    # ensure label is appropriate for dense loss functions
+                    ground_truth = tf.cast(d_dict['label'], tf.int32)
+                    one_hot = tf.one_hot(tf.squeeze(ground_truth, axis=-1),
+                                         depth=self.segmentation_param.num_classes)
+                    d_dict['label'] = one_hot
+            else:
+                with tf.name_scope('mixup'):
+                    # get the mixing parameter from the Beta distribution
+                    alpha = self.segmentation_param.mixup_alpha
+                    beta = tf.distributions.Beta(alpha, alpha)  # 1, 1: uniform:
+                    rand_frac = beta.sample()
+
+                    # get another minibatch
+                    d_dict_to_mix = switch_sampler(for_training=True)
+
+                    # look at binarised labels: sort them
+                    if self.segmentation_param.mix_match:
+                        # sum up the positive labels to sort by their volumes
+                        inds1 = tf.argsort(tf.map_fn(tf.reduce_sum, tf.cast(d_dict['label'], tf.int64)))
+                        inds2 = tf.argsort(tf.map_fn(tf.reduce_sum, tf.cast(d_dict_to_mix['label'] > 0, tf.int64)))
+                        for field in [field for field in mix_fields if field in d_dict]:
+                            d_dict[field] = tf.gather(d_dict[field], indices=inds1)
+                            # note: sorted for opposite directions for d_dict_to_mix
+                            d_dict_to_mix[field] = tf.gather(d_dict_to_mix[field], indices=inds2[::-1])
+
+                    # making the labels dense and one-hot
+                    for d in (d_dict, d_dict_to_mix):
+                        ground_truth = tf.cast(d['label'], tf.int32)
+                        one_hot = tf.one_hot(tf.squeeze(ground_truth, axis=-1),
+                                             depth=self.segmentation_param.num_classes)
+                        d['label'] = one_hot
+
+                    # do the mixing for any fields that are relevant and present
+                    mixed_up = {field: d_dict[field] * rand_frac + d_dict_to_mix[field] * (1 - rand_frac) for field
+                                in mix_fields if field in d_dict}
+                    # reassign all relevant values in d_dict
+                    d_dict.update(mixed_up)
+
+            return d_dict
+
         if self.is_training:
-            if self.action_param.validation_every_n > 0:
+            if not self.segmentation_param.do_mixup:
                 data_dict = tf.cond(tf.logical_not(self.is_validation),
                                     lambda: switch_sampler(for_training=True),
                                     lambda: switch_sampler(for_training=False))
             else:
-                data_dict = switch_sampler(for_training=True)
+                # mix up the samples if not in validation phase
+                data_dict = tf.cond(tf.logical_not(self.is_validation),
+                                    lambda: mixup_switch_sampler(for_training=True),
+                                    lambda: mixup_switch_sampler(for_training=False))  # don't mix the validation
 
             image = tf.cast(data_dict['image'], tf.float32)
             net_args = {'is_training': self.is_training,
@@ -344,9 +414,19 @@ class SegmentationApplication(BaseApplication):
             grads = self.optimiser.compute_gradients(
                 loss, var_list=to_optimise, colocate_gradients_with_ops=True)
 
+            self.total_loss = loss
+
             # collecting gradients variables
             gradients_collector.add_to_collection([grads])
+
             # collecting output variables
+            outputs_collector.add_to_collection(
+                var=self.total_loss, name='total_loss',
+                average_over_devices=True, collection=CONSOLE)
+            outputs_collector.add_to_collection(
+                var=self.total_loss, name='total_loss',
+                average_over_devices=True, summary_type='scalar',
+                collection=TF_SUMMARIES)
             outputs_collector.add_to_collection(
                 var=data_loss, name='loss',
                 average_over_devices=False, collection=CONSOLE)
@@ -402,7 +482,9 @@ class SegmentationApplication(BaseApplication):
     def interpret_output(self, batch_output):
         if self.is_inference:
             return self.output_decoder.decode_batch(
-                batch_output['window'], batch_output['location'])
+                {'window_seg': batch_output['window']},
+                batch_output['location'])
+
         return True
 
     def initialise_evaluator(self, eval_param):

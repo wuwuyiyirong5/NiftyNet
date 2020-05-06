@@ -157,6 +157,8 @@ class GANApplication(BaseApplication):
                                  outputs_collector=None,
                                  gradients_collector=None):
         if self.is_training:
+            self.patience = self.action_param.patience
+            self.mode = self.action_param.early_stopping_mode
             def switch_sampler(for_training):
                 with tf.name_scope('train' if for_training else 'validation'):
                     sampler = self.get_sampler()[0][0 if for_training else -1]
@@ -194,6 +196,16 @@ class GANApplication(BaseApplication):
                     lossD = lossD + reg_loss
                     lossG = lossG + reg_loss
 
+            self.total_loss = lossD + lossG
+
+            outputs_collector.add_to_collection(
+                var=self.total_loss, name='total_loss',
+                average_over_devices=True, collection=CONSOLE)
+            outputs_collector.add_to_collection(
+                var=self.total_loss, name='total_loss',
+                average_over_devices=True, summary_type='scalar',
+                collection=TF_SUMMARIES)
+
             # variables to display in STDOUT
             outputs_collector.add_to_collection(
                 var=lossD, name='lossD', average_over_devices=True,
@@ -203,10 +215,10 @@ class GANApplication(BaseApplication):
                 collection=CONSOLE)
             # variables to display in tensorboard
             outputs_collector.add_to_collection(
-                var=lossG, name='lossG', average_over_devices=False,
+                var=lossD, name='lossD', average_over_devices=True,
                 collection=TF_SUMMARIES)
             outputs_collector.add_to_collection(
-                var=lossG, name='lossD', average_over_devices=True,
+                var=lossG, name='lossG', average_over_devices=False,
                 collection=TF_SUMMARIES)
 
             with tf.name_scope('Optimiser'):
@@ -264,4 +276,5 @@ class GANApplication(BaseApplication):
         if self.is_training:
             return True
         return self.output_decoder.decode_batch(
-            batch_output['image'], batch_output['location'])
+            {'window_image': batch_output['image']},
+            batch_output['location'])

@@ -1,3 +1,7 @@
+# Status update - 2020-04-21
+
+⚠️ **NiftyNet is not actively maintained anymore**. We have learned a lot in our journey and decided to redirect most of the development efforts towards [MONAI](https://github.com/Project-MONAI/MONAI/).
+
 # NiftyNet
 
 <img src="https://github.com/NifTK/NiftyNet/raw/dev/niftynet-logo.png" width="263" height="155">
@@ -44,8 +48,7 @@ HIG -- High-dimensional Imaging Group, UCL), where BMEIS acts as the consortium 
 ### Installation
 
 1. Please install the appropriate [TensorFlow][tf] package*:
-   * [`pip install tensorflow-gpu==1.12`][tf-pypi-gpu] for TensorFlow with GPU support
-   * [`pip install tensorflow==1.12`][tf-pypi] for CPU-only TensorFlow
+   * [`pip install "tensorflow==1.15.*"`][tf-pypi]
 1. [`pip install niftynet`](https://pypi.org/project/NiftyNet/)
 
  <sup>All other NiftyNet dependencies are installed automatically as part of the pip installation process.

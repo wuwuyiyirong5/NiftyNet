@@ -2,22 +2,17 @@
 """
 This module defines niftynet parameters and their defaults.
 """
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-from __future__ import unicode_literals
+from __future__ import (absolute_import, division, print_function,
+                        unicode_literals)
 
 import os
 
+from niftynet.engine.image_window_dataset import SMALLER_FINAL_BATCH_MODE
 from niftynet.io.image_loader import SUPPORTED_LOADERS
 from niftynet.io.image_sets_partitioner import SUPPORTED_PHASES
-from niftynet.engine.image_window_dataset import SMALLER_FINAL_BATCH_MODE
-from niftynet.utilities.user_parameters_helper import float_array
-from niftynet.utilities.user_parameters_helper import int_array
-from niftynet.utilities.user_parameters_helper import spatial_atleast3d
-from niftynet.utilities.user_parameters_helper import spatialnumarray
-from niftynet.utilities.user_parameters_helper import str2boolean
-from niftynet.utilities.user_parameters_helper import str_array
+from niftynet.utilities.user_parameters_helper import (
+    float_array, int_array, spatial_atleast3d, spatialnumarray, str2boolean,
+    str_array)
 from niftynet.utilities.util_import import require_module
 
 DEFAULT_INFERENCE_OUTPUT = os.path.join('.', 'output')
@@ -25,14 +20,10 @@ DEFAULT_EVALUATION_OUTPUT = os.path.join('.', 'evaluation')
 DEFAULT_DATASET_SPLIT_FILE = os.path.join('.', 'dataset_split.csv')
 DEFAULT_HISTOGRAM_REF_FILE = os.path.join('.', 'histogram_ref_file.txt')
 DEFAULT_MODEL_DIR = None
-DEFAULT_EVENT_HANDLERS = (
-    'model_saver',
-    'model_restorer',
-    'sampler_threading',
-    'apply_gradients',
-    'output_interpreter',
-    'console_logger',
-    'tensorboard_logger')
+DEFAULT_EVENT_HANDLERS = ('model_saver', 'model_restorer', 'sampler_threading',
+                          'apply_gradients', 'output_interpreter',
+                          'console_logger', 'tensorboard_logger',
+                          'performance_logger')
 
 DEFAULT_ITERATION_GENERATOR = 'iteration_generator'
 
@@ -91,6 +82,7 @@ def add_application_args(parser):
         help='String representing an iteration generator class',
         type=str,
         default=DEFAULT_ITERATION_GENERATOR)
+
     return parser
 
 
@@ -148,6 +140,13 @@ def add_inference_args(parser):
         type=spatialnumarray,
         default=(0, 0, 0))
 
+    parser.add_argument(
+        "--fill_constant",
+        help="[Inference only] Output fill value "
+             "used fill borders of output images.",
+        type=float,
+        default=0.0)
+
     return parser
 
 
@@ -186,6 +185,22 @@ def add_input_data_args(parser):
         type=str,
         help="Input list of subjects in csv files",
         default='')
+
+    parser.add_argument(
+        "--csv_data_file",
+        metavar='',
+        type=str,
+        help="Path to a csv with data; labels, features or coordinates for"
+             "the patch based sampler",
+        default='')
+
+    parser.add_argument(
+        "--to_ohe",
+        help="Indicates if the data provided in the csv should be "
+             "one-hot-encoded."
+             "This is only valid when the csv_data_file has 2 columns",
+        type=str2boolean,
+        default=False)
 
     parser.add_argument(
         "--path_to_search",
@@ -324,13 +339,29 @@ def add_network_args(parser):
         default='minimum')
 
     parser.add_argument(
+        "--volume_padding_to_size",
+        help="Choose size to pad all input volumes to. Any dimensions "
+             "that exceed the desired size will be kept the same. Default: "
+             "(0, ) which indicates not to use this mode. ",
+        type=spatialnumarray,
+        default=(0,)
+    )
+
+    parser.add_argument(
         "--window_sampling",
         metavar='TYPE_STR',
         help="How to sample patches from each loaded image:"
              " 'uniform': fixed size uniformly distributed,"
              " 'resize': resize image to the patch size.",
-        choices=['uniform', 'resize', 'balanced', 'weighted'],
+        choices=['uniform', 'resize', 'balanced', 'weighted', 'patch'],
         default='uniform')
+
+    parser.add_argument(
+        "--force_output_identity_resizing",
+        metavar=str2boolean,
+        help="Forces the shape of the inferred output to match the "
+        "input label shape rather than be resized to input image shape.",
+        default=False)
 
     parser.add_argument(
         "--queue_length",
@@ -370,14 +401,19 @@ def add_network_args(parser):
 
     parser.add_argument(
         "--foreground_type",
-        choices=list(
-            niftynet.layer.binary_masking.SUPPORTED_MASK_TYPES),
+        choices=list(niftynet.layer.binary_masking.SUPPORTED_MASK_TYPES),
         help="type_str of foreground masking strategy used",
         default='otsu_plus')
 
     parser.add_argument(
         "--normalisation",
         help="Indicates if the normalisation must be performed",
+        type=str2boolean,
+        default=False)
+
+    parser.add_argument(
+        "--rgb_normalisation",
+        help="Indicates if RGB histogram equilisation should be performed",
         type=str2boolean,
         default=False)
 
@@ -627,6 +663,22 @@ def add_training_args(parser):
         help="regex strings matching variable to be fixed during training",
         type=str,
         default='')
+
+    parser.add_argument(
+        "--patience",
+        metavar='',
+        help='Number of iterations to wait before starting '
+             'performance monitoring',
+        type=int,
+        default=100)
+
+    parser.add_argument(
+        "--early_stopping_mode",
+        metavar='',
+        help="Choose between {'mean', 'robust_mean', 'median', "
+             "'generalisation_loss', 'median_smoothing', 'validation_up'}",
+        type=str,
+        default='mean')
 
     return parser
 
